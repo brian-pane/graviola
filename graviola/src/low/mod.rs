@@ -145,6 +145,7 @@ cfg_if::cfg_if! {
         pub(crate) use aarch64::bignum_demont_p384::bignum_demont_p384;
         pub(crate) use aarch64::bignum_digitsize::bignum_digitsize;
         pub(crate) use aarch64::bignum_emontredc_8n::bignum_emontredc_8n;
+        pub(crate) use aarch64::bignum_emontredc_8n_cdiff::bignum_emontredc_8n_cdiff;
         pub(crate) use aarch64::bignum_eq::bignum_eq;
         pub(crate) use aarch64::bignum_inv_p256::bignum_inv_p256;
         pub(crate) use aarch64::bignum_inv_p384::bignum_inv_p384;

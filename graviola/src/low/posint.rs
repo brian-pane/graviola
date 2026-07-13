@@ -450,8 +450,9 @@ impl<const N: usize> PosInt<N> {
         let mut tmp = [0u64; 24];
         let mut res = [0u64; 32];
         low::bignum_ksqr_16_32(&mut res, self.as_words(), &mut tmp);
+        let mut m_precalc = [0u64; 96];
 
-        self.mont_reduce8_in_place(&mut res, n, n0);
+        self.mont_reduce8_in_place(&mut res, n, n0, &mut m_precalc);
     }
 
     /// Specialisation of `mont_sqr`, using 2048-bit karatsuba squaring
@@ -469,8 +470,9 @@ impl<const N: usize> PosInt<N> {
         let mut tmp = [0u64; 72];
         let mut res = [0u64; 64];
         low::bignum_ksqr_32_64(&mut res, self.as_words(), &mut tmp);
+        let mut m_precalc = [0u64; 200];
 
-        self.mont_reduce8_in_place(&mut res, n, n0);
+        self.mont_reduce8_in_place(&mut res, n, n0, &mut m_precalc);
     }
 
     /// Full montgomery reduction, specialised for multiples of 8 word reductions.
@@ -490,8 +492,8 @@ impl<const N: usize> PosInt<N> {
 
     /// Variant of `mont_reduce8` that replaces `self` with the result
     /// instead of creating a new object.
-    fn mont_reduce8_in_place(&mut self, product: &mut [u64], n: &Self, n0: u64) {
-        let carry = low::bignum_emontredc_8n(product, n.as_words(), n0);
+    fn mont_reduce8_in_place(&mut self, product: &mut [u64], n: &Self, n0: u64, tmp: &mut [u64]) {
+        let carry = low::bignum_emontredc_8n_cdiff(product, n.as_words(), n0, tmp);
         let (_, reduced) = product.split_at(product.len() / 2);
         let carry = carry | low::bignum_cmp_lt(n.as_words(), reduced);
 
