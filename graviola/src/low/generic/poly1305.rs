@@ -1,22 +1,21 @@
 // Written for Graviola by Joe Birr-Pixton, 2024.
 // SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT-0
-// Originally from cifra, but later adopting the 32x32
+// Originally from cifra, but later adopting the 64x64
 // multiplication layout from poly1305-donna.
 
 use super::blockwise::Blockwise;
-
 pub(crate) struct Poly1305 {
     /// Current accumulator
-    h: [u32; 5],
+    h: [u64; 3],
 
     /// Block multiplier
-    r: [u32; 5],
+    r: [u64; 3],
 
-    /// r[1..5] times 5
-    r5: [u32; 4],
+    /// r[1..3] times (5 << 2), precomputed
+    r5: [u64; 2],
 
     /// Final XOR offset
-    s: [u32; 4],
+    s: [u8; 16],
 
     /// Unprocessed input
     bw: Blockwise<16>,
@@ -24,21 +23,14 @@ pub(crate) struct Poly1305 {
 
 impl Poly1305 {
     pub(crate) fn new(key: &[u8; 32]) -> Self {
-        let h = [0; 5];
-        let r = [
-            read32(&key[0..4]) & 0x3ffffff,
-            (read32(&key[3..7]) >> 2) & 0x3ffff03,
-            (read32(&key[6..10]) >> 4) & 0x3ffc0ff,
-            (read32(&key[9..13]) >> 6) & 0x3f03fff,
-            (read32(&key[12..16]) >> 8) & 0x00fffff,
-        ];
-        let r5 = [r[1] * 5, r[2] * 5, r[3] * 5, r[4] * 5];
-        let s = [
-            read32(&key[16..20]),
-            read32(&key[20..24]),
-            read32(&key[24..28]),
-            read32(&key[28..32]),
-        ];
+        let h = [0; 3];
+        let mut r = to_limbs(&key[0..16].try_into().unwrap());
+        r[0] &= 0xffc0fffffff;
+        r[1] &= 0xfffffc0ffff;
+        r[2] &= 0x00ffffffc0f;
+        const MULTIPLIER: u64 = 5 << 2;
+        let r5 = [r[1] * MULTIPLIER, r[2] * MULTIPLIER];
+        let s = key[16..32].try_into().unwrap();
         Self {
             h,
             r,
@@ -52,12 +44,12 @@ impl Poly1305 {
         let bytes = self.bw.add_leading(bytes);
 
         if let Some(block) = self.bw.take() {
-            self.process_whole_block(&block);
+            self.process_whole_block(&block, false);
         }
 
         let mut full_blocks = bytes.chunks_exact(16);
         for block in full_blocks.by_ref() {
-            self.process_whole_block(block.try_into().unwrap());
+            self.process_whole_block(block.try_into().unwrap(), false);
         }
 
         self.bw.add_trailing(full_blocks.remainder());
@@ -70,42 +62,30 @@ impl Poly1305 {
 
         full_reduce(&mut self.h);
 
-        // redistribute into 4 words
-        self.h[0] |= self.h[1] << 26;
-        self.h[1] = (self.h[1] >> 6) | (self.h[2] << 20);
-        self.h[2] = (self.h[2] >> 12) | (self.h[3] << 14);
-        self.h[3] = (self.h[3] >> 18) | (self.h[4] << 8);
-
         // add s with carry
-        fn add32(a: u32, b: u32) -> u64 {
-            (a as u64) + (b as u64)
-        }
-        let f = add32(self.h[0], self.s[0]);
-        self.h[0] = f as u32;
-        let f = add32(self.h[1], self.s[1]) + (f >> 32);
-        self.h[1] = f as u32;
-        let f = add32(self.h[2], self.s[2]) + (f >> 32);
-        self.h[2] = f as u32;
-        let f = add32(self.h[3], self.s[3]) + (f >> 32);
-        self.h[3] = f as u32;
+        let s = to_limbs(&self.s);
+        self.h[0] += s[0];
+        let carry = self.h[0] >> 44;
+        self.h[0] &= 0xfffffffffff;
+        self.h[1] += s[1] + carry;
+        let carry = self.h[1] >> 44;
+        self.h[1] &= 0xfffffffffff;
+        self.h[2] += s[2] + carry;
+        self.h[2] &= 0x3ffffffffff;
 
-        let mut r = [0u8; 16];
-        r[0..4].copy_from_slice(&self.h[0].to_le_bytes());
-        r[4..8].copy_from_slice(&self.h[1].to_le_bytes());
-        r[8..12].copy_from_slice(&self.h[2].to_le_bytes());
-        r[12..16].copy_from_slice(&self.h[3].to_le_bytes());
+        // redistribute into 2 words
+        self.h[0] |= self.h[1] << 44;
+        self.h[1] = (self.h[1] >> 20) | (self.h[2] << 24);
 
+        let mut r = [0; 16];
+        r[0..8].copy_from_slice(&self.h[0].to_le_bytes());
+        r[8..16].copy_from_slice(&self.h[1].to_le_bytes());
         r
     }
 
-    fn process_whole_block(&mut self, inp: &[u8; 16]) {
-        let block = [
-            read32(&inp[0..4]) & 0x3ff_ffff,
-            (read32(&inp[3..7]) >> 2) & 0x3ff_ffff,
-            (read32(&inp[6..10]) >> 4) & 0x3ff_ffff,
-            (read32(&inp[9..13]) >> 6) & 0x3ff_ffff,
-            (read32(&inp[12..16]) >> 8) | (1 << 24),
-        ];
+    fn process_whole_block(&mut self, inp: &[u8; 16], is_final: bool) {
+        let mut block = to_limbs(inp);
+        block[2] |= ((!is_final) as u64) << 40;
         self.process_block(&block);
     }
 
@@ -113,148 +93,126 @@ impl Poly1305 {
         let mut bytes = [0u8; 16];
         bytes[..inp.len()].copy_from_slice(inp);
         bytes[inp.len()] = 0x01;
-
-        let block = [
-            read32(&bytes[0..4]) & 0x3ff_ffff,
-            (read32(&bytes[3..7]) >> 2) & 0x3ff_ffff,
-            (read32(&bytes[6..10]) >> 4) & 0x3ff_ffff,
-            (read32(&bytes[9..13]) >> 6) & 0x3ff_ffff,
-            (read32(&bytes[12..16]) >> 8),
-        ];
-        self.process_block(&block);
+        self.process_whole_block(&bytes, true);
     }
 
-    fn process_block(&mut self, block: &[u32; 5]) {
+    fn process_block(&mut self, block: &[u64; 3]) {
         add(&mut self.h, block);
         mul(&mut self.h, &self.r, &self.r5);
     }
 }
 
-fn read32(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes.try_into().unwrap())
+fn read64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes.try_into().unwrap())
 }
 
-fn add(h: &mut [u32; 5], x: &[u32; 5]) {
+fn to_limbs(bytes: &[u8; 16]) -> [u64; 3] {
+    let low = read64(&bytes[0..8]);
+    let high = read64(&bytes[8..16]);
+    [
+        low & 0xfffffffffff,
+        ((low >> 44) | (high << 20)) & 0xfffffffffff,
+        (high >> 24) & 0x3ffffffffff,
+    ]
+}
+
+fn add(h: &mut [u64; 3], x: &[u64; 3]) {
     h[0] = h[0].wrapping_add(x[0]);
     h[1] = h[1].wrapping_add(x[1]);
     h[2] = h[2].wrapping_add(x[2]);
-    h[3] = h[3].wrapping_add(x[3]);
-    h[4] = h[4].wrapping_add(x[4]);
 }
 
-fn mul(h: &mut [u32; 5], r: &[u32; 5], s: &[u32; 4]) {
-    fn mul32(a: u32, b: u32) -> u64 {
-        u64::from(a) * u64::from(b)
+fn mul(h: &mut [u64; 3], r: &[u64; 3], s: &[u64; 2]) {
+    fn mul64(a: u64, b: u64) -> u128 {
+        u128::from(a) * u128::from(b)
     }
 
-    let d0 = mul32(h[0], r[0])
-        + mul32(h[1], s[3])
-        + mul32(h[2], s[2])
-        + mul32(h[3], s[1])
-        + mul32(h[4], s[0]);
-    let d1 = mul32(h[0], r[1])
-        + mul32(h[1], r[0])
-        + mul32(h[2], s[3])
-        + mul32(h[3], s[2])
-        + mul32(h[4], s[1]);
-    let d2 = mul32(h[0], r[2])
-        + mul32(h[1], r[1])
-        + mul32(h[2], r[0])
-        + mul32(h[3], s[3])
-        + mul32(h[4], s[2]);
-    let d3 = mul32(h[0], r[3])
-        + mul32(h[1], r[2])
-        + mul32(h[2], r[1])
-        + mul32(h[3], r[0])
-        + mul32(h[4], s[3]);
-    let d4 = mul32(h[0], r[4])
-        + mul32(h[1], r[3])
-        + mul32(h[2], r[2])
-        + mul32(h[3], r[1])
-        + mul32(h[4], r[0]);
+    let d0 = mul64(h[0], r[0])
+        + mul64(h[1], s[1])
+        + mul64(h[2], s[0]);
+    let d1 = mul64(h[0], r[1])
+        + mul64(h[1], r[0])
+        + mul64(h[2], s[1]);
+    let d2 = mul64(h[0], r[2])
+        + mul64(h[1], r[1])
+        + mul64(h[2], r[0]);
 
     // partial reduction
-    let carry = d0 >> 26;
-    h[0] = (d0 & 0x3ff_ffff) as u32;
+    let carry = d0 >> 44;
+    h[0] = d0 as u64 & 0xfffffffffff;
     let d1 = d1 + carry;
-    let carry = d1 >> 26;
-    h[1] = (d1 & 0x3ff_ffff) as u32;
+
+    let carry = d1 >> 44;
+    h[1] = d1 as u64 & 0xfffffffffff;
     let d2 = d2 + carry;
-    let carry = d2 >> 26;
-    h[2] = (d2 & 0x3ff_ffff) as u32;
-    let d3 = d3 + carry;
-    let carry = d3 >> 26;
-    h[3] = (d3 & 0x3ff_ffff) as u32;
-    let d4 = d4 + carry;
-    let carry = (d4 >> 26) as u32;
-    h[4] = (d4 & 0x3ff_ffff) as u32;
+
+    let carry = d2 >> 42;
+    h[2] = d2 as u64 & 0x3ffffffffff;
+
+    let carry = carry as u64;
     h[0] += carry * 5;
-    let carry = h[0] >> 26;
-    h[0] &= 0x3ff_ffff;
+
+    let carry = h[0] >> 44;
+    h[0] &= 0xfffffffffff;
     h[1] += carry;
 }
 
-fn full_reduce(h: &mut [u32; 5]) {
+fn full_reduce(h: &mut [u64; 3]) {
     min_reduce(h);
     maybe_sub_130_5(h);
 }
 
-fn min_reduce(h: &mut [u32; 5]) {
-    let carry = h[1] >> 26;
-    h[1] &= 0x3ffffff;
+fn min_reduce(h: &mut [u64; 3]) {
+    let carry = h[1] >> 44;
+    h[1] &= 0xfffffffffff;
     h[2] = h[2].wrapping_add(carry);
 
-    let carry = h[2] >> 26;
-    h[2] &= 0x3ffffff;
-    h[3] = h[3].wrapping_add(carry);
+    let carry = h[2] >> 42;
+    h[2] &= 0x3ffffffffff;
+    h[0] = h[0].wrapping_add(carry * 5);
 
-    let carry = h[3] >> 26;
-    h[3] &= 0x3ffffff;
-    h[4] = h[4].wrapping_add(carry);
+    let carry = h[0] >> 44;
+    h[0] &= 0xfffffffffff;
+    h[1] = h[1].wrapping_add(carry);
 
-    let carry = h[4] >> 26;
-    h[4] &= 0x3ffffff;
-    h[0] = h[0].wrapping_add(carry.wrapping_mul(5));
+    let carry = h[1] >> 44;
+    h[1] &= 0xfffffffffff;
+    h[2] = h[2].wrapping_add(carry);
 
-    let carry = h[0] >> 26;
-    h[0] &= 0x3ffffff;
+    let carry = h[2] >> 42;
+    h[2] &= 0x3ffffffffff;
+    h[0] = h[0].wrapping_add(carry * 5);
+
+    let carry = h[0] >> 44;
+    h[0] &= 0xfffffffffff;
     h[1] = h[1].wrapping_add(carry);
 }
 
-fn maybe_sub_130_5(h: &mut [u32; 5]) {
+fn maybe_sub_130_5(h: &mut [u64; 3]) {
     let g0 = h[0].wrapping_add(5);
-    let carry = g0 >> 26;
-    let g0 = g0 & 0x3ffffff;
+    let carry = g0 >> 44;
+    let g0 = g0 & 0xfffffffffff;
 
     let g1 = h[1].wrapping_add(carry);
-    let carry = g1 >> 26;
-    let g1 = g1 & 0x3ffffff;
+    let carry = g1 >> 44;
+    let g1 = g1 & 0xfffffffffff;
 
-    let g2 = h[2].wrapping_add(carry);
-    let carry = g2 >> 26;
-    let g2 = g2 & 0x3ffffff;
+    let g2 = h[2].wrapping_add(carry).wrapping_sub(1u64 << 42);
 
-    let g3 = h[3].wrapping_add(carry);
-    let carry = g3 >> 26;
-    let g3 = g3 & 0x3ffffff;
-
-    let g4 = h[4].wrapping_add(carry).wrapping_sub(1 << 26);
-
-    let negative_mask = equal_mask(g4 & 0x80000000, 0x80000000);
+    const HIGH_BIT: u64 = 1u64 << 63;
+    let negative_mask = equal_mask(g2 & HIGH_BIT, HIGH_BIT);
     let positive_mask = !negative_mask;
 
     h[0] = (h[0] & negative_mask) | (g0 & positive_mask);
     h[1] = (h[1] & negative_mask) | (g1 & positive_mask);
     h[2] = (h[2] & negative_mask) | (g2 & positive_mask);
-    h[3] = (h[3] & negative_mask) | (g3 & positive_mask);
-    h[4] = (h[4] & negative_mask) | (g4 & positive_mask);
 }
 
 /// Produce 0xffffffff if x == y, zero
-fn equal_mask(x: u32, y: u32) -> u32 {
+fn equal_mask(x: u64, y: u64) -> u64 {
     let diff = x ^ y;
     let diff_is_zero = !diff & diff.wrapping_sub(1);
-    0u32.wrapping_sub(diff_is_zero >> 31)
+    0u64.wrapping_sub(diff_is_zero >> 63)
 }
 
 #[cfg(test)]
