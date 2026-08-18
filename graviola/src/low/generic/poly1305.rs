@@ -3,6 +3,8 @@
 // Originally from cifra, but later adopting the 32x32
 // multiplication layout from poly1305-donna.
 
+use core::arch::aarch64::{uint32x2_t, vaddvq_u64, vandq_u64, vgetq_lane_u64, vld1_dup_u32, vld1_u32, vmlal_u32, vmull_u32};
+use core::mem;
 use super::blockwise::Blockwise;
 
 pub(crate) struct Poly1305 {
@@ -126,7 +128,8 @@ impl Poly1305 {
 
     fn process_block(&mut self, block: &[u32; 5]) {
         add(&mut self.h, block);
-        mul(&mut self.h, &self.r, &self.r5);
+        // SAFETY: this crate requires the `neon` CPU feature.
+        unsafe { mul(&mut self.h, &self.r, &self.r5) };
     }
 }
 
@@ -142,49 +145,62 @@ fn add(h: &mut [u32; 5], x: &[u32; 5]) {
     h[4] = h[4].wrapping_add(x[4]);
 }
 
+#[target_feature(enable = "neon")]
 fn mul(h: &mut [u32; 5], r: &[u32; 5], s: &[u32; 4]) {
     fn mul32(a: u32, b: u32) -> u64 {
         u64::from(a) * u64::from(b)
     }
 
-    let d0 = mul32(h[0], r[0])
-        + mul32(h[1], s[3])
-        + mul32(h[2], s[2])
-        + mul32(h[3], s[1])
-        + mul32(h[4], s[0]);
-    let d1 = mul32(h[0], r[1])
-        + mul32(h[1], r[0])
-        + mul32(h[2], s[3])
-        + mul32(h[3], s[2])
-        + mul32(h[4], s[1]);
-    let d2 = mul32(h[0], r[2])
-        + mul32(h[1], r[1])
-        + mul32(h[2], r[0])
-        + mul32(h[3], s[3])
-        + mul32(h[4], s[2]);
-    let d3 = mul32(h[0], r[3])
-        + mul32(h[1], r[2])
-        + mul32(h[2], r[1])
-        + mul32(h[3], r[0])
-        + mul32(h[4], s[3]);
-    let d4 = mul32(h[0], r[4])
-        + mul32(h[1], r[3])
-        + mul32(h[2], r[2])
-        + mul32(h[3], r[1])
-        + mul32(h[4], r[0]);
+    fn pack(low: u32, high: u32) -> uint32x2_t {
+        let tmp = (low as u64) | ((high as u64) << 32);
+        unsafe { mem::transmute(tmp) }
+    }
+
+    let h0x2 = unsafe { vld1_dup_u32(&h[0]) };
+    let h1x2 = unsafe { vld1_dup_u32(&h[1]) };
+    let h2x2 = unsafe { vld1_dup_u32(&h[2]) };
+    let h3x2 = unsafe { vld1_dup_u32(&h[3]) };
+    let h4x2 = unsafe { vld1_dup_u32(&h[4]) };
+
+    let r01 = unsafe { vld1_u32(&r[0]) };
+    let r23 = unsafe { vld1_u32(&r[2]) };
+
+    let d01 = vmull_u32(h0x2, r01);
+    let d23 = vmull_u32(h0x2, r23);
+
+    let d01 = vmlal_u32(d01, h1x2, pack(s[3], r[0]));
+    let d23 = vmlal_u32(d23, h1x2, pack(r[1], r[2]));
+
+    let d01 = vmlal_u32(d01, h2x2, pack(s[2], s[3]));
+    let d23 = vmlal_u32(d23, h2x2, pack(r[0], r[1]));
+
+    let d01 = vmlal_u32(d01, h3x2, pack(s[1], s[2]));
+    let d23 = vmlal_u32(d23, h3x2, pack(s[3], r[0]));
+
+    let d01 = vmlal_u32(d01, h4x2, pack(s[0], s[1]));
+    let d23 = vmlal_u32(d23, h4x2, pack(s[2], s[3]));
+
+    let d44 = vmull_u32(h0x2, pack(r[4], 0));
+    let d44 = vmlal_u32(d44, pack(h[1], h[2]), pack(r[3], r[2]));
+    let d44 = vmlal_u32(d44, pack(h[3], h[4]), pack(r[1], r[0]));
 
     // partial reduction
+    let d0 = vgetq_lane_u64(d01, 0);
     let carry = d0 >> 26;
     h[0] = (d0 & 0x3ff_ffff) as u32;
+    let d1 = vgetq_lane_u64(d01, 1);
     let d1 = d1 + carry;
     let carry = d1 >> 26;
     h[1] = (d1 & 0x3ff_ffff) as u32;
+    let d2 = vgetq_lane_u64(d23, 0);
     let d2 = d2 + carry;
     let carry = d2 >> 26;
     h[2] = (d2 & 0x3ff_ffff) as u32;
+    let d3 = vgetq_lane_u64(d23, 1);
     let d3 = d3 + carry;
     let carry = d3 >> 26;
     h[3] = (d3 & 0x3ff_ffff) as u32;
+    let d4 = vaddvq_u64(d44);
     let d4 = d4 + carry;
     let carry = (d4 >> 26) as u32;
     h[4] = (d4 & 0x3ff_ffff) as u32;
