@@ -424,9 +424,9 @@ impl Coeffs<{ K * K * N }, Ntt> {
         // We have a by-4 keccak, so we can attack the problem in two
         // sets of four, followed by one straggler.
 
-        let mut work_iter = SAMPLE_POLY_WORK.chunks_exact(4);
+        let (work_iter, remainder) = SAMPLE_POLY_WORK.as_chunks::<4>();
 
-        for c4 in work_iter.by_ref() {
+        for c4 in work_iter {
             let inputs = match TRANSPOSED {
                 false => &[
                     &[c4[0].1, c4[0].0],
@@ -449,7 +449,7 @@ impl Coeffs<{ K * K * N }, Ntt> {
             );
         }
 
-        for (i, j, offs) in work_iter.remainder() {
+        for (i, j, offs) in remainder {
             let input = match TRANSPOSED {
                 false => &[*j, *i],
                 true => &[*i, *j],
@@ -912,8 +912,10 @@ impl<const C: usize> Coeffs<C, Normal> {
 }
 
 fn sample_cbd2(buf: &[u8; 128], out: &mut [i16; 256]) {
-    for (in_bytes, out_coeffs) in buf.chunks_exact(4).zip(out.chunks_exact_mut(8)) {
-        let t = u32::from_le_bytes(in_bytes.try_into().unwrap());
+    let (buf_chunks, _) = buf.as_chunks::<4>();
+    let (out_chunks, _) = out.as_chunks_mut::<8>();
+    for (in_bytes, out_coeffs) in buf_chunks.iter().zip(out_chunks.iter_mut()) {
+        let t = u32::from_le_bytes(*in_bytes);
         let d = (t & 0x5555_5555) + ((t >> 1) & 0x5555_5555);
 
         for (j, coeff) in out_coeffs.iter_mut().enumerate() {
@@ -1005,7 +1007,11 @@ impl Iterator for Shake128TwelveBitIterator {
             let mut bytes = [0u8; sha3::SHAKE_128_R_BYTES];
             self.sponge.squeeze(&mut bytes);
 
-            for (buf, d) in bytes.chunks_exact(3).zip(self.samples.chunks_exact_mut(2)) {
+            let (chunks, _) = bytes.as_chunks::<3>();
+            for (buf, d) in chunks
+                .iter()
+                .zip(self.samples.as_chunks_mut::<2>().0.iter_mut())
+            {
                 d[0] = (u16::from_le_bytes([buf[0], buf[1]]) & 0xfff) as i16;
                 d[1] = (u16::from_le_bytes([buf[1], buf[2]]) >> 4) as i16;
             }
