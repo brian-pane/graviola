@@ -70,7 +70,8 @@ impl Sha256Context {
         self.update_blocks(last_blocks.as_ref());
 
         let mut r = [0u8; Self::OUTPUT_SZ];
-        for (out, state) in r.chunks_exact_mut(4).zip(self.h.iter()) {
+        let (chunks, _) = r.as_chunks_mut::<4>();
+        for (out, state) in chunks.iter_mut().zip(self.h.iter()) {
             out.copy_from_slice(&state.to_be_bytes());
         }
         r
@@ -200,7 +201,8 @@ impl Sha512Context {
         self.update_blocks(last_blocks.as_ref());
 
         let mut r = [0u8; Self::OUTPUT_SZ];
-        for (out, state) in r.chunks_exact_mut(8).zip(self.h.iter()) {
+        let (chunks, _) = r.as_chunks_mut::<8>();
+        for (out, state) in chunks.iter_mut().zip(self.h.iter()) {
             out.copy_from_slice(&state.to_be_bytes());
         }
         r

@@ -413,7 +413,8 @@ impl AffineMontPoint {
         // now linearise, so table lookup can be type safe
         let mut t = [0; 192];
 
-        for (out, rr) in t.chunks_exact_mut(12).zip(r) {
+        let (chunks, _) = t.as_chunks_mut::<12>();
+        for (out, rr) in chunks.iter_mut().zip(r) {
             out.copy_from_slice(&rr.xyz);
         }
 

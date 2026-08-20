@@ -98,7 +98,8 @@ impl<const N: usize> PosInt<N> {
         let required_bytes = self.used * 8;
         let out = out.get_mut(..required_bytes).ok_or(Error::OutOfRange)?;
 
-        for (chunk, word) in out.chunks_exact_mut(8).rev().zip(self.as_words().iter()) {
+        let (chunks, _) = out.as_chunks_mut::<8>();
+        for (chunk, word) in chunks.iter_mut().rev().zip(self.as_words().iter()) {
             chunk.copy_from_slice(&word.to_be_bytes());
         }
 
@@ -117,7 +118,8 @@ impl<const N: usize> PosInt<N> {
         {
             let (_, val) = out.split_at_mut(1);
 
-            for (chunk, word) in val.chunks_exact_mut(8).rev().zip(self.as_words().iter()) {
+            let (chunks, _) = val.as_chunks_mut::<8>();
+            for (chunk, word) in chunks.iter_mut().rev().zip(self.as_words().iter()) {
                 chunk.copy_from_slice(&word.to_be_bytes());
             }
         }
