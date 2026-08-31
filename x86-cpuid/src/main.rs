@@ -13,6 +13,7 @@ fn main() {
     let avx = is_x86_feature_detected!("avx");
     let avx2 = is_x86_feature_detected!("avx2");
     let sha = is_x86_feature_detected!("sha");
+    let sha512 = is_x86_feature_detected!("sha512");
     let ssse3 = is_x86_feature_detected!("ssse3");
 
     let avx512f = is_x86_feature_detected!("avx512f");
@@ -27,8 +28,8 @@ fn main() {
     println!(
         "{{ \"cpuid\": {{ \"aes\": {}, \"pclmulqdq\": {}, \"bmi1\": {},\
          \"bmi2\": {}, \"adx\": {}, \"avx\": {}, \"avx2\": {},\
-         \"ssse3\": {}, \"sha\": {}, \"avx512f\": {}, \"avx512bw\": {}, \"avx512vl\": {},\
-         \"vaes\": {}, \"vpclmulqdq\": {} }},\
+         \"ssse3\": {}, \"sha\": {}, \"sha512\": {}, \"avx512f\": {},\
+         \"avx512bw\": {}, \"avx512vl\": {}, \"vaes\": {}, \"vpclmulqdq\": {} }},\
          \"compatible\": {}, \"supports_avx512_aes_gcm\": {} }}",
         aes as u8,
         pclmulqdq as u8,
@@ -39,6 +40,7 @@ fn main() {
         avx2 as u8,
         ssse3 as u8,
         sha as u8,
+        sha512 as u8,
         avx512f as u8,
         avx512bw as u8,
         avx512vl as u8,

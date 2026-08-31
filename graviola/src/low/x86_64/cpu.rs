@@ -157,6 +157,9 @@ macro_rules! have_cpu_feature {
     ("sha") => {
         crate::low::x86_64::cpu::test_toggle("sha", is_x86_feature_detected!("sha"))
     };
+    ("sha512") => {
+        crate::low::x86_64::cpu::test_toggle("sha512", is_x86_feature_detected!("sha512"))
+    }
 }
 
 /// Token type reflecting the check for CPU features needed for AVX512-AES-GCM
@@ -188,6 +191,19 @@ pub(crate) struct HaveSha256(());
 impl HaveSha256 {
     pub(crate) fn check() -> Option<Self> {
         match have_cpu_feature!("sha") {
+            true => Some(Self(())),
+            false => None,
+        }
+    }
+}
+
+/// Token type reflecting the check for the x86_64 SHA-512 extension instructions
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HaveSha512(());
+
+impl HaveSha512 {
+    pub(crate) fn check() -> Option<Self> {
+        match have_cpu_feature!("sha512") {
             true => Some(Self(())),
             false => None,
         }
