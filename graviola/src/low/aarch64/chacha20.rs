@@ -3,7 +3,7 @@
 // Originally from cifra
 
 use core::arch::aarch64::{
-    uint8x16_t, uint32x4_t, vaddq_u32, vdupq_n_u32, veorq_u32, vorrq_u32, vqtbl1q_u8,
+    uint8x16_t, uint32x4_t, vaddq_u32, vdupq_n_u32, veorq_u32, vextq_u32, vorrq_u32, vqtbl1q_u8,
     vreinterpretq_u8_u32, vreinterpretq_u16_u32, vreinterpretq_u32_u8, vreinterpretq_u32_u16,
     vreinterpretq_u32_u64, vreinterpretq_u64_u32, vrev32q_u16, vshlq_n_u32, vshrq_n_u32,
     vzip1q_u32, vzip1q_u64, vzip2q_u32, vzip2q_u64,
@@ -35,19 +35,23 @@ impl ChaCha20 {
     }
 
     pub(crate) fn cipher(&mut self, buffer: &mut [u8]) {
-        let (by4, remainder) = buffer.as_chunks_mut::<256>();
-        for block_x4 in by4 {
+        let (by5, remainder) = buffer.as_chunks_mut::<320>();
+        for block_x5 in by5 {
             // SAFETY: this crate depends on the `neon` cpu feature.
-            unsafe { core_x4(&self.key0, &self.key1, &self.nonce, block_x4) };
-            self.nonce[0] = self.nonce[0].wrapping_add(4);
+            unsafe { core_x5(&self.key0, &self.key1, &mut self.nonce, block_x5) };
         }
-        for block in remainder.chunks_mut(64) {
+        let (blocks, remainder) = remainder.as_chunks_mut::<64>();
+        for block in blocks {
+            // SAFETY: this crate depends on the `neon` cpu feature.
+            unsafe { core(&self.key0, &self.key1, &mut self.nonce, block) };
+        }
+        if !remainder.is_empty() {
             let mut stream = [0u8; 64];
-            core(&self.key0, &self.key1, &self.nonce, &mut stream);
-            for (out, key) in block.iter_mut().zip(stream.iter()) {
+            // SAFETY: this crate depends on the `neon` cpu feature.
+            unsafe { core(&self.key0, &self.key1, &mut self.nonce, &mut stream) };
+            for (out, key) in remainder.iter_mut().zip(stream.iter()) {
                 *out ^= *key;
             }
-            self.nonce[0] = self.nonce[0].wrapping_add(1);
         }
     }
 }
@@ -98,80 +102,69 @@ macro_rules! rotate_left {
     };
 }
 
-// Process one ChaCha20 block and store the result in `out`.
-fn core(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 64]) {
-    let [mut z0, mut z1, mut z2, mut z3] = SIGMA;
-    let &[mut z4, mut z5, mut z6, mut z7] = key0;
-    let &[mut z8, mut z9, mut za, mut zb] = key1;
-    let &[mut zc, mut zd, mut ze, mut zf] = nonce;
-
-    let (x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, xa, xb, xc, xd, xe, xf) = (
-        z0, z1, z2, z3, z4, z5, z6, z7, z8, z9, za, zb, zc, zd, ze, zf,
-    );
-
-    macro_rules! quarter {
-        ($a:ident, $b:ident, $c:ident, $d:ident) => {
-            $a = $a.wrapping_add($b);
-            $d = ($d ^ $a).rotate_left(16);
-            $c = $c.wrapping_add($d);
-            $b = ($b ^ $c).rotate_left(12);
-            $a = $a.wrapping_add($b);
-            $d = ($d ^ $a).rotate_left(8);
-            $c = $c.wrapping_add($d);
-            $b = ($b ^ $c).rotate_left(7);
-        };
+// Interleaved computation of a round of ChaCha for one or more blocks, each expressed as
+// a quartet of vectors (a, b, c, d)
+macro_rules! round {
+    ($($a:ident, $b:ident, $c:ident, $d:ident),+) => {
+        $( $a = vaddq_u32($a, $b); )*
+        $( $d = veorq_u32($d, $a); )*
+        $( $d = rotate_left!($d, 16); )*
+        $( $c = vaddq_u32($c, $d); )*
+        $( $b = veorq_u32($b, $c); )*
+        $( $b = rotate_left!($b, 12); )*
+        $( $a = vaddq_u32($a, $b); )*
+        $( $d = veorq_u32($d, $a); )*
+        $( $d = rotate_left!($d, 8); )*
+        $( $c = vaddq_u32($c, $d); )*
+        $( $b = veorq_u32($b, $c); )*
+        $( $b = rotate_left!($b, 7); )*
     }
-
-    for _ in 0..10 {
-        quarter!(z0, z4, z8, zc);
-        quarter!(z1, z5, z9, zd);
-        quarter!(z2, z6, za, ze);
-        quarter!(z3, z7, zb, zf);
-        quarter!(z0, z5, za, zf);
-        quarter!(z1, z6, zb, zc);
-        quarter!(z2, z7, z8, zd);
-        quarter!(z3, z4, z9, ze);
-    }
-
-    let x0 = x0.wrapping_add(z0);
-    let x1 = x1.wrapping_add(z1);
-    let x2 = x2.wrapping_add(z2);
-    let x3 = x3.wrapping_add(z3);
-    let x4 = x4.wrapping_add(z4);
-    let x5 = x5.wrapping_add(z5);
-    let x6 = x6.wrapping_add(z6);
-    let x7 = x7.wrapping_add(z7);
-    let x8 = x8.wrapping_add(z8);
-    let x9 = x9.wrapping_add(z9);
-    let xa = xa.wrapping_add(za);
-    let xb = xb.wrapping_add(zb);
-    let xc = xc.wrapping_add(zc);
-    let xd = xd.wrapping_add(zd);
-    let xe = xe.wrapping_add(ze);
-    let xf = xf.wrapping_add(zf);
-
-    out[0..4].copy_from_slice(&x0.to_le_bytes());
-    out[4..8].copy_from_slice(&x1.to_le_bytes());
-    out[8..12].copy_from_slice(&x2.to_le_bytes());
-    out[12..16].copy_from_slice(&x3.to_le_bytes());
-    out[16..20].copy_from_slice(&x4.to_le_bytes());
-    out[20..24].copy_from_slice(&x5.to_le_bytes());
-    out[24..28].copy_from_slice(&x6.to_le_bytes());
-    out[28..32].copy_from_slice(&x7.to_le_bytes());
-    out[32..36].copy_from_slice(&x8.to_le_bytes());
-    out[36..40].copy_from_slice(&x9.to_le_bytes());
-    out[40..44].copy_from_slice(&xa.to_le_bytes());
-    out[44..48].copy_from_slice(&xb.to_le_bytes());
-    out[48..52].copy_from_slice(&xc.to_le_bytes());
-    out[52..56].copy_from_slice(&xd.to_le_bytes());
-    out[56..60].copy_from_slice(&xe.to_le_bytes());
-    out[60..64].copy_from_slice(&xf.to_le_bytes());
 }
 
-// Process four ChaCha20 blocks in an interleaved manner and exclusive-or
+fn add_xor(value: uint32x4_t, initial: uint32x4_t, dst: &mut [u8; 16]) {
+    // SAFETY: the memory layout of `uint32x4_t` is compatible with `u128`.
+    let value128: u128 = unsafe { mem::transmute(vaddq_u32(value, initial)) };
+    let current = u128::from_le_bytes(*dst);
+    let result = value128 ^ current;
+    dst.copy_from_slice(&result.to_le_bytes());
+}
+
+// Process one ChaCha20 block and store the result in `out`.
+#[target_feature(enable = "neon")]
+fn core(key0: &[u32; 4], key1: &[u32; 4], nonce: &mut [u32; 4], out: &mut [u8; 64]) {
+    let mut a = u32_slice_to_uint32x4_t(&SIGMA);
+    let mut b = u32_slice_to_uint32x4_t(key0);
+    let mut c = u32_slice_to_uint32x4_t(key1);
+    let mut d = u32_slice_to_uint32x4_t(nonce);
+
+    let a_initial = a;
+    let b_initial = b;
+    let c_initial = c;
+    let d_initial = d;
+
+    for _ in 0..10 {
+        round!(a, b, c, d);
+        b = vextq_u32(b, b, 1);
+        c = vextq_u32(c, c, 2);
+        d = vextq_u32(d, d, 3);
+        round!(a, b, c, d);
+        b = vextq_u32(b, b, 3);
+        c = vextq_u32(c, c, 2);
+        d = vextq_u32(d, d, 1);
+    }
+
+    add_xor(a, a_initial, (&mut out[0..16]).try_into().unwrap());
+    add_xor(b, b_initial, (&mut out[16..32]).try_into().unwrap());
+    add_xor(c, c_initial, (&mut out[32..48]).try_into().unwrap());
+    add_xor(d, d_initial, (&mut out[48..64]).try_into().unwrap());
+
+    nonce[0] = nonce[0].wrapping_add(1);
+}
+
+// Process five ChaCha20 blocks in an interleaved manner and exclusive-or
 // the result onto the contents of `out`.
 #[target_feature(enable = "neon")]
-fn core_x4(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 256]) {
+fn core_x5(key0: &[u32; 4], key1: &[u32; 4], nonce: &mut [u32; 4], out: &mut [u8; 320]) {
     // Each block is computed from four inputs, all of which are [u32; 4]
     // a = SIGMA
     // b = key0
@@ -185,7 +178,7 @@ fn core_x4(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 25
     //    previous block. The only input that varies among blocks is d, and it
     //    can be calculated from the nonce and the block's sequence number.
     //
-    // This implementation operates on four blocks at a time. Initially, the blocks are:
+    // This implementation operates on five blocks at a time. Initially, the blocks are:
     //
     // Block 0:
     //  a0_0, a0_1, a0_2, a0_3 = SIGMA
@@ -195,13 +188,14 @@ fn core_x4(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 25
     //
     // ...
     //
-    // Block 3:
-    //  a3_0, a3_1, a3_2, a3_3 = SIGMA
-    //  b3_0, b3_1, b3_2, b3_3 = key0
-    //  c3_0, c3_1, c3_2, c3_3 = key1
-    //  d3_0, d3_1, d3_2, d3_3 = block counter and nonce, where d3_0 = d0_0.wrapping_add(3)
+    // Block 4:
+    //  a4_0, a4_1, a4_2, a4_3 = SIGMA
+    //  b4_0, b4_1, b4_2, b4_3 = key0
+    //  c4_0, c4_1, c4_2, c4_3 = key1
+    //  d4_0, d4_1, d4_2, d4_3 = block counter and nonce, where d4_0 = d0_0.wrapping_add(4)
     //
-    // We group these into 16 vertical columns, each of which fits in a uint32x4_t vector register.
+    // We group the first four blocks into 16 vertical columns, each of which fits in a
+    // uint32x4_t vector register.
     // col_a_0 = [ a0_0, a1_0, a2_0, a3_0]
     // col_a_1 = [ a0_1, a1_1, a2_1, a3_1]
     // ...
@@ -232,72 +226,49 @@ fn core_x4(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 25
     let mut col_d_2 = vdupq_n_u32(nonce[2]);
     let mut col_d_3 = vdupq_n_u32(nonce[3]);
 
-    let col_a_0_initial = col_a_0;
-    let col_a_1_initial = col_a_1;
-    let col_a_2_initial = col_a_2;
-    let col_a_3_initial = col_a_3;
-    let col_b_0_initial = col_b_0;
-    let col_b_1_initial = col_b_1;
-    let col_b_2_initial = col_b_2;
-    let col_b_3_initial = col_b_3;
-    let col_c_0_initial = col_c_0;
-    let col_c_1_initial = col_c_1;
-    let col_c_2_initial = col_c_2;
-    let col_c_3_initial = col_c_3;
-    let col_d_0_initial = col_d_0;
-    let col_d_1_initial = col_d_1;
-    let col_d_2_initial = col_d_2;
-    let col_d_3_initial = col_d_3;
+    // The fifth block is organised as rows. (Note: It's more efficient to do the
+    // ChaCha computations with column vectors than rows, but we don't have enough
+    // SIMD registers to do another set of four blocks in the inner loop. So we
+    // interleave four blocks structured as columns and one block structured as
+    // rows.)
+    let mut row_a = u32_slice_to_uint32x4_t(&SIGMA);
+    let mut row_b = u32_slice_to_uint32x4_t(key0);
+    let mut row_c = u32_slice_to_uint32x4_t(key1);
+    let mut row_d = vaddq_u32(
+        u32_slice_to_uint32x4_t(nonce),
+        u32_slice_to_uint32x4_t(&[4, 0, 0, 0]),
+    );
 
-    macro_rules! quarter_column {
-        ($a:ident, $b:ident, $c:ident, $d:ident) => {
-            $a = vaddq_u32($a, $b);
-            $d = rotate_left!(veorq_u32($d, $a), 16);
-            $c = vaddq_u32($c, $d);
-            $b = rotate_left!(veorq_u32($b, $c), 12);
-            $a = vaddq_u32($a, $b);
-            $d = rotate_left!(veorq_u32($d, $a), 8);
-            $c = vaddq_u32($c, $d);
-            $b = rotate_left!(veorq_u32($b, $c), 7);
-        };
-    }
+    // Save the initial values, which we'll need to add to the block result later.
+    let row_a_initial = row_a;
+    let row_b_initial = row_b;
+    let row_c_initial = row_c;
+    let row_d_initial = u32_slice_to_uint32x4_t(nonce);
 
-    // Compute 20 rounds of ChaCha20.
+    // Compute 20 rounds of ChaCha.
     for _ in 0..10 {
-        quarter_column!(col_a_0, col_b_0, col_c_0, col_d_0);
-        quarter_column!(col_a_1, col_b_1, col_c_1, col_d_1);
-        quarter_column!(col_a_2, col_b_2, col_c_2, col_d_2);
-        quarter_column!(col_a_3, col_b_3, col_c_3, col_d_3);
+        // Block n
+        round!(
+            col_a_0, col_b_0, col_c_0, col_d_0, col_a_1, col_b_1, col_c_1, col_d_1, col_a_2,
+            col_b_2, col_c_2, col_d_2, col_a_3, col_b_3, col_c_3, col_d_3, row_a, row_b, row_c,
+            row_d
+        );
 
-        quarter_column!(col_a_0, col_b_1, col_c_2, col_d_3);
-        quarter_column!(col_a_1, col_b_2, col_c_3, col_d_0);
-        quarter_column!(col_a_2, col_b_3, col_c_0, col_d_1);
-        quarter_column!(col_a_3, col_b_0, col_c_1, col_d_2);
-    }
-
-    col_a_0 = vaddq_u32(col_a_0, col_a_0_initial);
-    col_a_1 = vaddq_u32(col_a_1, col_a_1_initial);
-    col_a_2 = vaddq_u32(col_a_2, col_a_2_initial);
-    col_a_3 = vaddq_u32(col_a_3, col_a_3_initial);
-    col_b_0 = vaddq_u32(col_b_0, col_b_0_initial);
-    col_b_1 = vaddq_u32(col_b_1, col_b_1_initial);
-    col_b_2 = vaddq_u32(col_b_2, col_b_2_initial);
-    col_b_3 = vaddq_u32(col_b_3, col_b_3_initial);
-    col_c_0 = vaddq_u32(col_c_0, col_c_0_initial);
-    col_c_1 = vaddq_u32(col_c_1, col_c_1_initial);
-    col_c_2 = vaddq_u32(col_c_2, col_c_2_initial);
-    col_c_3 = vaddq_u32(col_c_3, col_c_3_initial);
-    col_d_0 = vaddq_u32(col_d_0, col_d_0_initial);
-    col_d_1 = vaddq_u32(col_d_1, col_d_1_initial);
-    col_d_2 = vaddq_u32(col_d_2, col_d_2_initial);
-    col_d_3 = vaddq_u32(col_d_3, col_d_3_initial);
-
-    fn xor(value: uint32x4_t, dst: &mut [u8; 16]) {
-        // SAFETY: the memory layout of `uint32x4_t` is compatible with `u128`.
-        let value128: u128 = unsafe { mem::transmute(value) };
-        let current = u128::from_le_bytes(*dst);
-        let result = value128 ^ current;
-        dst.copy_from_slice(&result.to_le_bytes());
+        // Block n+1: same operations as block n, but with the inputs shuffled.
+        // For the columns, it's easy to shuffle the inputs as they're in different
+        // vector registers. For the rows, we have to rearrange the lanes within
+        // each vector.
+        row_b = vextq_u32(row_b, row_b, 1);
+        row_c = vextq_u32(row_c, row_c, 2);
+        row_d = vextq_u32(row_d, row_d, 3);
+        round!(
+            col_a_0, col_b_1, col_c_2, col_d_3, col_a_1, col_b_2, col_c_3, col_d_0, col_a_2,
+            col_b_3, col_c_0, col_d_1, col_a_3, col_b_0, col_c_1, col_d_2, row_a, row_b, row_c,
+            row_d
+        );
+        row_b = vextq_u32(row_b, row_b, 3);
+        row_c = vextq_u32(row_c, row_c, 2);
+        row_d = vextq_u32(row_d, row_d, 1);
     }
 
     // Transpose four adjacent column vectors into row vectors.
@@ -335,29 +306,110 @@ fn core_x4(key0: &[u32; 4], key1: &[u32; 4], nonce: &[u32; 4], out: &mut [u8; 25
     // The column vectors now contain the result of the ChaCha20 computation on
     // four successive blocks. We transpose them into rows to XOR the result onto
     // the output buffer.
-    let (row0, row1, row2, row3) = cols_to_rows(col_a_0, col_a_1, col_a_2, col_a_3);
-    xor(row0, (&mut out[0..16]).try_into().unwrap());
-    xor(row1, (&mut out[64..80]).try_into().unwrap());
-    xor(row2, (&mut out[128..144]).try_into().unwrap());
-    xor(row3, (&mut out[192..208]).try_into().unwrap());
+    let (row_a_0, row_a_1, row_a_2, row_a_3) = cols_to_rows(col_a_0, col_a_1, col_a_2, col_a_3);
+    add_xor(
+        row_a_0,
+        row_a_initial,
+        (&mut out[0..16]).try_into().unwrap(),
+    );
+    add_xor(
+        row_a_1,
+        row_a_initial,
+        (&mut out[64..80]).try_into().unwrap(),
+    );
+    add_xor(
+        row_a_2,
+        row_a_initial,
+        (&mut out[128..144]).try_into().unwrap(),
+    );
+    add_xor(
+        row_a_3,
+        row_a_initial,
+        (&mut out[192..208]).try_into().unwrap(),
+    );
 
-    let (row0, row1, row2, row3) = cols_to_rows(col_b_0, col_b_1, col_b_2, col_b_3);
-    xor(row0, (&mut out[16..32]).try_into().unwrap());
-    xor(row1, (&mut out[80..96]).try_into().unwrap());
-    xor(row2, (&mut out[144..160]).try_into().unwrap());
-    xor(row3, (&mut out[208..224]).try_into().unwrap());
+    let (row_b_0, row_b_1, row_b_2, row_b_3) = cols_to_rows(col_b_0, col_b_1, col_b_2, col_b_3);
+    add_xor(
+        row_b_0,
+        row_b_initial,
+        (&mut out[16..32]).try_into().unwrap(),
+    );
+    add_xor(
+        row_b_1,
+        row_b_initial,
+        (&mut out[80..96]).try_into().unwrap(),
+    );
+    add_xor(
+        row_b_2,
+        row_b_initial,
+        (&mut out[144..160]).try_into().unwrap(),
+    );
+    add_xor(
+        row_b_3,
+        row_b_initial,
+        (&mut out[208..224]).try_into().unwrap(),
+    );
 
     let (row0, row1, row2, row3) = cols_to_rows(col_c_0, col_c_1, col_c_2, col_c_3);
-    xor(row0, (&mut out[32..48]).try_into().unwrap());
-    xor(row1, (&mut out[96..112]).try_into().unwrap());
-    xor(row2, (&mut out[160..176]).try_into().unwrap());
-    xor(row3, (&mut out[224..240]).try_into().unwrap());
+    add_xor(row0, row_c_initial, (&mut out[32..48]).try_into().unwrap());
+    add_xor(row1, row_c_initial, (&mut out[96..112]).try_into().unwrap());
+    add_xor(
+        row2,
+        row_c_initial,
+        (&mut out[160..176]).try_into().unwrap(),
+    );
+    add_xor(
+        row3,
+        row_c_initial,
+        (&mut out[224..240]).try_into().unwrap(),
+    );
 
     let (row0, row1, row2, row3) = cols_to_rows(col_d_0, col_d_1, col_d_2, col_d_3);
-    xor(row0, (&mut out[48..64]).try_into().unwrap());
-    xor(row1, (&mut out[112..128]).try_into().unwrap());
-    xor(row2, (&mut out[176..192]).try_into().unwrap());
-    xor(row3, (&mut out[240..256]).try_into().unwrap());
+    add_xor(row0, row_d_initial, (&mut out[48..64]).try_into().unwrap());
+    const ONE: uint32x4_t = u32_slice_to_uint32x4_t(&[1, 0, 0, 0]);
+    let row_d_initial = vaddq_u32(row_d_initial, ONE);
+    add_xor(
+        row1,
+        row_d_initial,
+        (&mut out[112..128]).try_into().unwrap(),
+    );
+    let row_d_initial = vaddq_u32(row_d_initial, ONE);
+    add_xor(
+        row2,
+        row_d_initial,
+        (&mut out[176..192]).try_into().unwrap(),
+    );
+    let row_d_initial = vaddq_u32(row_d_initial, ONE);
+    add_xor(
+        row3,
+        row_d_initial,
+        (&mut out[240..256]).try_into().unwrap(),
+    );
+
+    // The row vectors contain the result of the ChaCha computation on the fifth block.
+    add_xor(
+        row_a,
+        row_a_initial,
+        (&mut out[256..272]).try_into().unwrap(),
+    );
+    add_xor(
+        row_b,
+        row_b_initial,
+        (&mut out[272..288]).try_into().unwrap(),
+    );
+    add_xor(
+        row_c,
+        row_c_initial,
+        (&mut out[288..304]).try_into().unwrap(),
+    );
+    let row_d_initial = vaddq_u32(row_d_initial, ONE);
+    add_xor(
+        row_d,
+        row_d_initial,
+        (&mut out[304..320]).try_into().unwrap(),
+    );
+
+    nonce[0] = nonce[0].wrapping_add(5);
 }
 
 fn hchacha(key0: &mut [u32; 4], key1: &mut [u32; 4], nonce: &[u32; 4]) {
